@@ -143,90 +143,156 @@ async function fetchCodeforcesStats(handle) {
     }
 }
 
-// ─── CodeChef (Direct Scraping) ──────────────────────────────
-// The third-party CodeChef APIs are unreliable/paywalled.
-// We scrape the public profile page directly using Cheerio.
+// ─── CodeChef ────────────────────────────────────────────────
+// Strategy 1: Parse the __NEXT_DATA__ JSON embedded in the profile page.
+// Strategy 2: Fall back to Cheerio CSS selectors.
+// Monthly solved: fetched via CodeChef's internal /recent/user API.
 async function fetchCodechefStats(handle) {
     if (!handle) return null;
+
+    let rating = 0;
+    let stars = '0';
+    let totalSolved = 0;
+    let monthlySolved = 0;
+
     try {
         const resp = await axios.get(`https://www.codechef.com/users/${handle}`, {
             timeout: 15000,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml',
+                'Accept': 'text/html,application/xhtml+xml,*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
             },
         });
 
         const html = resp.data;
         const $ = cheerio.load(html);
 
-        let rating = 0;
-        let stars = '0';
-        let totalSolved = 0;
-
-        // Parse CodeChef Next.js hydration data JSON
-        // Codechef puts user data in a global __NEXT_DATA__ script tag or similar
+        // ── Strategy 1: __NEXT_DATA__ JSON (most reliable) ──────────
         const nextDataScript = $('#__NEXT_DATA__').html();
         if (nextDataScript) {
             try {
-                const data = JSON.parse(nextDataScript);
-                const user = data?.props?.pageProps?.user;
-                if (user) {
-                    rating = parseInt(user.rating) || 0;
-                    stars = user.stars || '1';
+                const nextData = JSON.parse(nextDataScript);
+                const pageProps = nextData?.props?.pageProps;
+
+                // CodeChef stores profile data under different keys across versions
+                // Try each path in priority order
+                const userData =
+                    pageProps?.data ||          // current layout
+                    pageProps?.user ||          // older layout
+                    pageProps?.userDetails ||   // alternate key
+                    null;
+
+                if (userData) {
+                    rating = parseInt(userData.currentRating ?? userData.rating ?? 0) || 0;
+                    stars = String(userData.stars ?? userData.star ?? '0');
+                    // totalSolved may be under different keys
+                    totalSolved =
+                        parseInt(userData.totalProblems ?? userData.total_problems ?? userData.problem_count ?? 0) || 0;
+
+                    console.log(`CodeChef __NEXT_DATA__ (data key) for ${handle}: rating=${rating}, stars=${stars}, totalSolved=${totalSolved}`);
+                }
+
+                // Sometimes rating history array exists — pull latest rating from there
+                if (rating === 0) {
+                    const ratingArr =
+                        pageProps?.ratingData ||
+                        pageProps?.data?.ratingData ||
+                        pageProps?.user?.all_rating ||
+                        null;
+                    if (Array.isArray(ratingArr) && ratingArr.length > 0) {
+                        const latest = ratingArr[ratingArr.length - 1];
+                        rating = parseInt(latest?.rating ?? latest?.end_rating ?? 0) || 0;
+                    }
                 }
             } catch (e) {
-                // ignore
+                console.warn(`CodeChef __NEXT_DATA__ parse error for ${handle}:`, e.message);
             }
         }
 
-        // Fallback for rating: Look at the rating-number div
+        // ── Strategy 2: Cheerio CSS selectors (fallback) ─────────────
         if (rating === 0) {
-            const ratingText = $('.rating-number').text().trim() ||
-                $('.rating-header .rating-number').text().trim() ||
-                $('a[href^="/ratings/all"]').first().text().trim();
-            const rMatch = ratingText.match(/(\d+)/);
+            const ratingText =
+                $('.rating-number').first().text().trim() ||
+                $('[class*="rating"]').first().text().trim();
+            const rMatch = ratingText.match(/(\d{3,4})/);
             if (rMatch) rating = parseInt(rMatch[1]);
         }
 
-        // Fallback for total solved
-        const headingText = $('h3:contains("Total Problems Solved")').text();
-        const solvedMatch = headingText.match(/(\d+)/);
-        if (solvedMatch) {
-            totalSolved = parseInt(solvedMatch[1]);
-        }
-
-        // Fallback for total solved: Find the 'Total Problems Solved' text across all elements
         if (totalSolved === 0) {
-            const rawTextMatch = html.match(/Total\s*Problems\s*Solved\s*:\s*(\d+)/i);
-            if (rawTextMatch) totalSolved = parseInt(rawTextMatch[1]);
+            // Try <h3> containing "Total Problems Solved"
+            $('h3, h4, p, span, div').each((_, el) => {
+                const txt = $(el).text();
+                const m = txt.match(/Total\s*Problems?\s*Solved\s*[:\-]?\s*(\d+)/i);
+                if (m) { totalSolved = parseInt(m[1]); return false; }
+            });
         }
 
-        // Fallback for stars
+        if (totalSolved === 0) {
+            const rawMatch = html.match(/Total\s*Problems?\s*Solved\s*[:\-]?\s*(\d+)/i);
+            if (rawMatch) totalSolved = parseInt(rawMatch[1]);
+        }
+
         if (stars === '0') {
-            const starText = $('.rating-star').text().trim() ||
-                $('span:contains("★")').first().text().trim();
-            const sMatch = starText.match(/(\d+)★/);
-            if (sMatch) stars = sMatch[1];
+            // Look for star emoji count or numeric star count
+            const starMatch = html.match(/(\d)\s*★/) || html.match(/"stars"\s*:\s*"?(\d+)"?/);
+            if (starMatch) stars = starMatch[1];
         }
 
-        console.log(`CodeChef scraped by Cheerio for ${handle}: rating=${rating}, stars=${stars}, totalSolved=${totalSolved}`);
+        console.log(`CodeChef final for ${handle}: rating=${rating}, stars=${stars}, totalSolved=${totalSolved}`);
 
-        // Only count it as success if we extracted at least *something*
         if (rating === 0 && totalSolved === 0) {
-            throw new Error('Profile layout changed or user not found');
+            throw new Error(`Could not extract any data for CodeChef handle: ${handle}`);
         }
-
-        return {
-            totalSolved,
-            monthlySolved: 0,
-            rating,
-            stars,
-        };
     } catch (err) {
-        console.error(`CodeChef Cheerio scrape error for ${handle}:`, err.message);
-        return null; // Return null instead of default 0s to trigger 'failed' result for User
+        console.error(`CodeChef profile fetch failed for ${handle}:`, err.message);
+        return null;
     }
+
+    // ── Monthly Solved via /recent/user internal API ──────────────
+    try {
+        const recentResp = await axios.get(
+            `https://www.codechef.com/recent/user?user_handle=${handle}&page=0&items=15`,
+            {
+                timeout: 10000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Referer': `https://www.codechef.com/users/${handle}`,
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+            }
+        );
+        const recentData = recentResp.data;
+
+        // Response is HTML table rows; parse dates from them
+        if (recentData?.activity) {
+            // activity is an array [{code, date, name, rating_change}]
+            const now = new Date();
+            const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+            monthlySolved = recentData.activity.filter(entry => {
+                const d = new Date(entry.date || entry.end_date || 0);
+                return d >= startOfMonth;
+            }).length;
+        } else if (typeof recentData === 'string') {
+            // HTML table — count rows with a date in current month
+            const $ = cheerio.load(recentData);
+            const now = new Date();
+            const monthStr = now.toLocaleString('default', { month: 'short' });
+            const yearStr = String(now.getFullYear());
+            $('tr').each((_, row) => {
+                const rowText = cheerio.load(row).text();
+                if (rowText.includes(monthStr) && rowText.includes(yearStr)) {
+                    monthlySolved++;
+                }
+            });
+        }
+        console.log(`CodeChef monthlySolved for ${handle}: ${monthlySolved}`);
+    } catch (err) {
+        console.warn(`CodeChef recent activity fetch failed for ${handle}:`, err.message);
+        monthlySolved = 0;
+    }
+
+    return { totalSolved, monthlySolved, rating, stars };
 }
 
 
