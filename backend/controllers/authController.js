@@ -23,10 +23,11 @@ exports.register = async (req, res) => {
 
         const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
+        const isProduction = process.env.NODE_ENV === 'production';
         res.cookie('token', token, {
             httpOnly: true,
-            sameSite: 'lax',
-            secure: false,
+            sameSite: isProduction ? 'none' : 'lax',  // 'none' required for cross-site on HTTPS
+            secure: isProduction,                      // must be true when sameSite='none'
             maxAge: 7 * 24 * 60 * 60 * 1000,
         });
 
@@ -60,10 +61,11 @@ exports.login = async (req, res) => {
 
         const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
+        const isProduction = process.env.NODE_ENV === 'production';
         res.cookie('token', token, {
             httpOnly: true,
-            sameSite: 'lax',
-            secure: false,
+            sameSite: isProduction ? 'none' : 'lax',  // 'none' required for cross-site on HTTPS
+            secure: isProduction,                      // must be true when sameSite='none'
             maxAge: 7 * 24 * 60 * 60 * 1000,
         });
 
