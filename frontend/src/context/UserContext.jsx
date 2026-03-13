@@ -1,6 +1,11 @@
 import { createContext, useContext, useState, useEffect } from 'react';
 import axios from 'axios';
 
+// In production, VITE_API_URL points to the deployed backend.
+// In dev, it's empty so the Vite proxy (localhost:4000) handles /api calls.
+axios.defaults.baseURL = import.meta.env.VITE_API_URL || '';
+
+
 const UserContext = createContext();
 
 export function UserProvider({ children }) {
